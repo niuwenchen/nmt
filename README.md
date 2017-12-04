@@ -33,3 +33,154 @@ Figure 1. <b>Encoder-decoder architecture</b> – example of a general approach 
 NMT. An encoder converts a source sentence into a "meaning" vector which is
 passed through a <i>decoder</i> to produce a translation.
 </p>
+
+Specifically, an NMT system first reads the source sentence using an *encoder* to build a "thought" vector,a sequence of numbers that represents the sentence meaning; a decoder, then, processes the sentence vector to emit a translation, as illustrated in Figure 1. This is often referred to as the encoder-decoder architecture. In this manner,NMT addresses the local translation problem tn the traditional phrase-based approach; it can capture long-range dependencies in languages, e.g., gender agreements; syntax structures; etc, and produce much more fluent translations as demonstrated by [Google Neural Machine Translation systems](Google Neural Machine Translation systems](https://research.googleblog.com/2016/09/a-neural-network-for-machine.html).
+
+NMT models vary in terms of their exact architectures, A natural choice for sequence data is the recurrent neural network(RNN),used by most NMt models,Usually is used for both the encoder and decoder. The RNN models, however,differ in terms of; (a) *directionality*-unidirectional or bidirectional; (b) depth-single-or multi-layer; and (c) *type* -often either a vanilla RNN,a Long Short-term Memory (LSTM),or gated recurrent unit(GRU).Interested readers can find more information about RNNS and LSTM on this [blog post]((http://colah.github.io/posts/2015-08-Understanding-LSTMs/)
+
+In this tutorial ,we consider as examples a deep *multi-layer RNN* which is unidirectional and uses LSTM as a recurrent unit. We show an example of such a model in figure 2. In this example ,we build a model to translat a source sentence "I am a student" into a target sentence "Je suis étudiant". As a hige level, the NMT consists of two recurrent neural networks: the encoder RNN simply consumes the input source words without marking ant prediction;the decoder, on the other hand, process the target sentence while predicting the nets words.
+
+For more information, we refer readers to [Luong (2016)](https://github.com/lmthang/thesis) which this tutorial is based on.
+
+<p align="center">
+<img width="48%" src="nmt/g3doc/img/seq2seq.jpg" />
+<br>
+Figure 2. <b>Neural machine translation</b> – example of a deep recurrent
+architecture proposed by for translating a source sentence "I am a student" into
+a target sentence "Je suis étudiant". Here, "&lts&gt" marks the start of the
+decoding process while "&lt/s&gt" tells the decoder to stop.
+</p>
+
+
+## Installing the Tutorial
+
+To install this tutorial, you need to have TensorFlow installed on your system.
+This tutorial requires TensorFlow Nightly. To install TensorFlow, follow
+the [installation instructions here](https://www.tensorflow.org/install/).
+
+Once TensorFlow is installed, you can download the source code of this tutorial
+by running:
+
+``` shell
+git clone https://github.com/tensorflow/nmt/
+```
+
+## Training – How to build our first NMT system
+
+Let's first dive into the heart of building an NMT model with concrete code
+snippets through which we will explain Figure 2 in more detail. We defer data
+preparation and the full code to later. This part refers to
+file
+[**model.py**](nmt/model.py).
+
+At the bottom layer, the encoder and decoder RNNs receive as input the
+following: first, the source sentence, then a boundary marker "\<s\>" which
+indicates the transition from the encoding to the decoding mode, and the target
+sentence.  For *training*, we will feed the system with the following tensors,
+which are in time-major format and contain word indices:
+
+-  **encoder_inputs** [max_encoder_time, batch_size]: source input words.
+-  **decoder_inputs** [max_decoder_time, batch_size]: target input words.
+-  **decoder_outputs** [max_decoder_time, batch_size]: target output words,
+   these are decoder_inputs shifted to the left by one time step with an
+   end-of-sentence tag appended on the right.
+
+Here for efficiency, we train with multiple sentences (batch_size) at
+once. Testing is slightly different, so we will discuss it later.
+
+### Embedding
+Given the categorical nature of words, the model must first loo up the source and target embeddings to retrieve the corresponding word representations. For this *embedding layer* to work, a vocabulary is first chosen for each language. Usually, a vocabulary size V is selected , and only the most frequent V words are treated as unique. All other words are converted to an "unknown" token and all get the same embedding. The embedding weights, one set per language, are usually learned during training.
+
+``` python
+# Embedding
+embedding_encoder = variable_scope.get_variable(
+    "embedding_encoder", [src_vocab_size, embedding_size], ...)
+# Look up embedding:
+#   encoder_inputs: [max_time, batch_size]
+#   encoder_emb_inp: [max_time, batch_size, embedding_size]
+encoder_emb_inp = embedding_ops.embedding_lookup(
+    embedding_encoder, encoder_inputs)
+```
+
+Similarity,we can build *embedding_decoder* and *decoder_emb_inp*.Note that one can choose to initialize embedding weights with pretrained word representations such as word2vec or Glove vectors. In general,given a large amount of training data we can learn these embeddings from scratch.
+
+### Encoder
+Once retrieved, the word embeddings are then fed as input into the main network,which consists of two multi-layer RNNs - an encoder for the source language and a decoder for the target language. These two RNNs, in principle,can share the same weights; however, in practice,we ofter use two different RNN parameters (such models do a better job when fitting large training datasets). The *encoder* RNN uses zero vectors as its starting states and is build as follows:
+``` python
+# Build RNN cell
+encoder_cell = tf.nn.rnn_cell.BasicLSTMCell(num_units)
+
+# Run Dynamic RNN
+#   encoder_outpus: [max_time, batch_size, num_units]
+#   encoder_state: [batch_size, num_units]
+encoder_outputs, encoder_state = tf.nn.dynamic_rnn(
+    encoder_cell, encoder_emb_inp,
+    sequence_length=source_sequence_length, time_major=True)
+```
+Note that sentence have different langhts to avoid wasting computation, we tell *dynamic_rnn* the exact source sentence lengths through *source_sequence_length*.
+Since our input is time major, we set *time_major=True*.Here,we build only a single layer LSTM, *encoder_cell*.We will describe how to build multi-layer LSTMs, add dropout, and use attention in aa later section.
+
+### Decoder
+
+The *decoder* also needs to have access to the source information, and one
+simple way to achieve that is to initialize it with the last hidden state of the
+encoder, *encoder_state*. In Figure 2, we pass the hidden state at the source
+word "student" to the decoder side.
+
+``` python
+# Build RNN cell
+decoder_cell = tf.nn.rnn_cell.BasicLSTMCell(num_units)
+```
+
+``` python
+# Helper
+helper = tf.contrib.seq2seq.TrainingHelper(
+    decoder_emb_inp, decoder_lengths, time_major=True)
+# Decoder
+decoder = tf.contrib.seq2seq.BasicDecoder(
+    decoder_cell, helper, encoder_state,
+    output_layer=projection_layer)
+# Dynamic decoding
+outputs, _ = tf.contrib.seq2seq.dynamic_decode(decoder, ...)
+logits = outputs.rnn_output
+```
+
+Here, the core part of this code is the *BasicDecoder* object, *decoder*, which
+receives *decoder_cell* (similar to encoder_cell), a *helper*, and the previous
+*encoder_state* as inputs. By separating out decoders and helpers, we can reuse
+different codebases, e.g., *TrainingHelper* can be substituted with
+*GreedyEmbeddingHelper* to do greedy decoding. See more in [helper.py](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/contrib/seq2seq/python/ops/helper.py).
+
+Lastly, we haven't mentioned *projection_layer* which is a dense matrix to turn
+the top hidden states to logit vectors of dimension V. We illustrate this
+process at the top of Figure 2.
+``` python
+projection_layer = layers_core.Dense(
+    tgt_vocab_size, use_bias=False)
+```
+
+
+### Loss
+
+Given the *logits* above, we are now ready to compute our training loss:
+
+``` python
+crossent = tf.nn.sparse_softmax_cross_entropy_with_logits(
+    labels=decoder_outputs, logits=logits)
+# 平均batch的loss (交叉熵*权重)/总的batch_size
+train_loss = (tf.reduce_sum(crossent * target_weights) /
+    batch_size)
+```
+
+Here, *target_weights* is a zero-one matrix of the same size as
+*decoder_outputs*. It masks padding positions outside of the target sequence
+lengths with values 0.
+
+
+***Important note***: It's worth pointing out that we divide the loss by
+*batch_size*, so our hyperparameters are "invariant" to batch_size. Some people
+divide the loss by (*batch_size* * *num_time_steps*), which plays down the
+errors made on short sentences. More subtly, our hyperparameters (applied to the
+former way) can't be used for the latter way. For example, if both approaches
+use SGD with a learning of 1.0, the latter approach effectively uses a much
+smaller learning rate of 1 / *num_time_steps*.
