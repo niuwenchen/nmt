@@ -184,3 +184,62 @@ errors made on short sentences. More subtly, our hyperparameters (applied to the
 former way) can't be used for the latter way. For example, if both approaches
 use SGD with a learning of 1.0, the latter approach effectively uses a much
 smaller learning rate of 1 / *num_time_steps*.
+
+### Gradient computation & optimization
+We have now defined the forward pass of our NMT model. Computing the
+backpropagation pass is just a matter of a few lines of code:
+
+``` python
+# Calculate and clip gradients
+params = tf.trainable_variables()
+# trainable_variables() 确实是params
+# 下面的这个方法又是怎么确定的
+gradients = tf.gradients(train_loss, params)
+clipped_gradients, _ = tf.clip_by_global_norm(
+    gradients, max_gradient_norm)
+```
+One of the important steps in training RNNs is gradient clipping.Here,we clip by the global norm.The max value,
+max_gradient_norm, is often set to a value like 5 or 1. The last step is selecting the optimizer. The Adam is a common  
+choice. We also select a learning rate.The value of learning_rate can is usually in he range 0.00001 to 0.001;and can 
+be set to decrease as training progresses.
+
+``` python
+# Optimization
+optimizer = tf.train.AdamOptimizer(learning_rate)
+update_step = optimizer.apply_gradients(
+    zip(clipped_gradients, params))
+```
+In our own experiments, we use standard SGD (tf.train.GradientDescentOptimizer)
+with a decreasing learning rate schedule, which yields better performance. See
+the [benchmarks](#benchmarks).
+
+
+## Hands-on – Let's train an NMT model
+Let's train our very first NMT model, translating from Vietnamese to English! The entry point of our code
+is [**nmt.py**](nmt/nmt.py).
+
+We will use a *small-scale parallel corpus of TED talks* (133K training examples) for this exercise. All data we used here can be found
+at: [https://nlp.stanford.edu/projects/nmt/](https://nlp.stanford.edu/projects/nmt/). We will use tst2012 as our dev dataset, and tst2013 as our test dataset.
+
+Run the following command to download the data for training NMT model:
+    
+    \`nmt/scripts/download_iwslt15.sh /tmp/nmt_data`
+    
+Run the following command to start the training:
+
+``` shell
+mkdir /tmp/nmt_model
+python -m nmt.nmt \
+    --src=vi --tgt=en \
+    --vocab_prefix=/tmp/nmt_data/vocab  \
+    --train_prefix=/tmp/nmt_data/train \
+    --dev_prefix=/tmp/nmt_data/tst2012  \
+    --test_prefix=/tmp/nmt_data/tst2013 \
+    --out_dir=/tmp/nmt_model \
+    --num_train_steps=12000 \
+    --steps_per_stats=100 \
+    --num_layers=2 \
+    --num_units=128 \
+    --dropout=0.2 \
+    --metrics=bleu
+```
